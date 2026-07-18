@@ -1,5 +1,6 @@
-import UIKit
 import Flutter
+import GoogleMaps
+import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -7,6 +8,9 @@ import Flutter
   private var ownWindow: UIWindow?
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    // Dummy key: the platform view still renders its error state, which is
+    // sufficient for exercising the session replay capture/mask pipeline.
+    GMSServices.provideAPIKey("AIzaSyDummyKeyForTestingPurposesOnly00001")
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
     let channel = FlutterMethodChannel(

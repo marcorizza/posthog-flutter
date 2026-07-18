@@ -120,18 +120,18 @@ class PlatformViewsScreen extends StatelessWidget {
               'per_view_mask_override',
             ),
           ),
-          if (defaultTargetPlatform == TargetPlatform.android) ...[
+          if (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS) ...[
             const SizedBox(height: 8),
             const Text(
-              'Non-WebView platform view (Android)',
+              'Non-WebView platform view (Google Maps)',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
             _CaseCard(
               title: 'Map — masked',
               subtitle:
-                  'GoogleMap in a Scaffold (hybrid-composition SurfaceView). '
-                  'Map area is a black box in replay.',
+                  'GoogleMap in a Scaffold. Map area is a black box in replay.',
               onTap: () => _push(
                 context,
                 const _GoogleMapsMixedScreen(),

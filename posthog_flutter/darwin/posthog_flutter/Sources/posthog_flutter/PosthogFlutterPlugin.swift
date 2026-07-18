@@ -582,11 +582,18 @@ extension PosthogFlutterPlugin {
                     return
                 }
 
-                // Only reveal a web view that the capture rect fully covers, and
-                // snapshot only the crop region. Requiring containment (not mere
-                // intersection) stops a neighboring MASKED web view that overlaps
-                // this captured view's rect from being snapshotted and leaked.
-                if let webView = self.findWKWebView(in: window, containedBy: cropRect) {
+                // Flutter wraps each embedded iOS platform view in a dedicated
+                // FlutterTouchInterceptingView. Resolve that exact wrapper first
+                // so a masked sibling contained by or overlapping the capture
+                // rect can never be selected instead.
+                guard let platformView = self.findFlutterPlatformView(in: window, matching: cropRect) else {
+                    onResult(nil)
+                    return
+                }
+
+                // WKWebView has a purpose-built asynchronous snapshot API that
+                // produces more reliable results than rendering its hierarchy.
+                if let webView = self.findWKWebView(in: platformView, containedBy: cropRect) {
                     let config = WKSnapshotConfiguration()
                     config.rect = webView.convert(cropRect, from: nil).intersection(webView.bounds)
                     guard !config.rect.isNull, !config.rect.isEmpty else {
@@ -603,10 +610,16 @@ extension PosthogFlutterPlugin {
                     return
                 }
 
-                // No WKWebView found for the captured rect. Returning nil here
-                // keeps this safe: drawHierarchy over the full window would
-                // include any masked CALayer-backed platform view overlapping
-                // the crop region and leak it into replay.
+                // Rendering the isolated wrapper (rather than the window)
+                // supports CALayer-backed views such as Google Maps without
+                // including masked sibling platform views.
+                if let snapshotImage = self.snapshotPlatformView(platformView, cropRect: cropRect) {
+                    onResult(self.imageToRawRgba(snapshotImage).map(FlutterStandardTypedData.init(bytes:)))
+                    return
+                }
+
+                // Do not fall back to rendering the full window: it could
+                // include a masked platform view overlapping the capture rect.
                 onResult(nil)
             }
         }
@@ -678,6 +691,50 @@ extension PosthogFlutterPlugin {
                 }
             }
             return nil
+        }
+
+        private func findFlutterPlatformView(in view: UIView, matching rect: CGRect) -> UIView? {
+            var candidates: [UIView] = []
+            collectFlutterPlatformViews(in: view, containedBy: rect, candidates: &candidates)
+            return candidates.min { lhs, rhs in
+                frameDistance(lhs.convert(lhs.bounds, to: nil), rect)
+                    < frameDistance(rhs.convert(rhs.bounds, to: nil), rect)
+            }
+        }
+
+        private func collectFlutterPlatformViews(in view: UIView, containedBy rect: CGRect,
+                                                 candidates: inout [UIView])
+        {
+            let className = NSStringFromClass(type(of: view)).split(separator: ".").last
+            if className == "FlutterTouchInterceptingView" {
+                let frameInWindow = view.convert(view.bounds, to: nil)
+                if rect.insetBy(dx: -1, dy: -1).contains(frameInWindow) {
+                    candidates.append(view)
+                }
+            }
+            for subview in view.subviews {
+                collectFlutterPlatformViews(in: subview, containedBy: rect, candidates: &candidates)
+            }
+        }
+
+        private func frameDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+            abs(lhs.minX - rhs.minX) + abs(lhs.minY - rhs.minY)
+                + abs(lhs.maxX - rhs.maxX) + abs(lhs.maxY - rhs.maxY)
+        }
+
+        private func snapshotPlatformView(_ view: UIView, cropRect: CGRect) -> UIImage? {
+            let frameInWindow = view.convert(view.bounds, to: nil)
+            let drawRect = frameInWindow.offsetBy(dx: -cropRect.minX, dy: -cropRect.minY)
+            let format = UIGraphicsImageRendererFormat.default()
+            // Dart composites native snapshots in logical pixels.
+            format.scale = 1
+            format.opaque = view.isOpaque
+
+            var didDraw = false
+            let image = UIGraphicsImageRenderer(size: cropRect.size, format: format).image { _ in
+                didDraw = view.drawHierarchy(in: drawRect, afterScreenUpdates: false)
+            }
+            return didDraw ? image : nil
         }
     #endif
 
