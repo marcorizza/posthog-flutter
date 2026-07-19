@@ -11,9 +11,9 @@ enum PostHogPlatformViewPrivacy {
   /// so no extra capture work is done. On iOS and hybrid composition the
   /// compositor fills the transparent hole via a native capture + srcOver.
   ///
-  /// On iOS, [WKWebView] uses its native snapshot API. Other embedded `UIView`
-  /// types, including Google Maps, are captured from Flutter's isolated native
-  /// platform-view container so masked sibling views are not revealed.
+  /// On iOS, the platform-view rectangle is captured from the native window so
+  /// Flutter overlays above it retain their real z-order. Replay privacy masks
+  /// are reapplied after compositing the native crop.
   capture,
 }
 

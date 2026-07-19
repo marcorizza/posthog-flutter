@@ -55,6 +55,40 @@ class _PlatformViewRects {
   const _PlatformViewRects({required this.masked, required this.captured});
 }
 
+/// Draws a native window crop containing a captured platform view and any
+/// Flutter overlays above it.
+@visibleForTesting
+void drawCapturedPlatformView(
+  Canvas canvas,
+  ui.Image nativeImage,
+  Rect destinationRect,
+) {
+  canvas.drawImageRect(
+    nativeImage,
+    Rect.fromLTWH(
+      0,
+      0,
+      nativeImage.width.toDouble(),
+      nativeImage.height.toDouble(),
+    ),
+    destinationRect,
+    Paint()..blendMode = ui.BlendMode.srcOver,
+  );
+}
+
+/// Returns the axis-aligned portion of a platform view that is inside the
+/// replay capture target, or `null` when the view is completely off-screen.
+@visibleForTesting
+Rect? visiblePlatformViewRect(
+  Rect localRect,
+  Matrix4 transform,
+  Rect captureBounds,
+) {
+  final transformedRect = MatrixUtils.transformRect(transform, localRect);
+  final visibleRect = transformedRect.intersect(captureBounds);
+  return visibleRect.isEmpty ? null : visibleRect;
+}
+
 class ScreenshotCapturer {
   final PostHogConfig _config;
   final ImageMaskPainter _imageMaskPainter = ImageMaskPainter();
@@ -157,7 +191,9 @@ class ScreenshotCapturer {
       ro is TextureBox;
 
   _PlatformViewRects _collectPlatformViewRects(
-      PostHogPlatformViewPrivacy defaultPolicy) {
+    PostHogPlatformViewPrivacy defaultPolicy,
+    Rect captureBounds,
+  ) {
     final masked = <ElementData>[];
     final captured = <ElementData>[];
     final ancestor = PostHogMaskController.instance.containerKey.currentContext
@@ -167,7 +203,14 @@ class ScreenshotCapturer {
     final rootElement = WidgetsBinding.instance.rootElement;
     if (rootElement != null) {
       _visitElementForPlatformViews(
-          rootElement, ancestor, masked, captured, seen, defaultPolicy);
+        rootElement,
+        ancestor,
+        masked,
+        captured,
+        seen,
+        defaultPolicy,
+        captureBounds,
+      );
     }
 
     if (masked.isNotEmpty || captured.isNotEmpty) {
@@ -184,6 +227,7 @@ class ScreenshotCapturer {
     List<ElementData> captured,
     Set<int> seen,
     PostHogPlatformViewPrivacy inheritedPolicy,
+    Rect captureBounds,
   ) {
     final policy = resolvePrivacyPolicyForElement(element, inheritedPolicy);
 
@@ -192,11 +236,26 @@ class ScreenshotCapturer {
         ro.hasSize &&
         ro.size.isValidSize &&
         _isPlatformViewRenderObject(ro)) {
-      _addIfNew(ro, ancestor, masked, captured, seen, policy);
+      _addIfNew(
+        ro,
+        ancestor,
+        masked,
+        captured,
+        seen,
+        policy,
+        captureBounds,
+      );
     }
     element.visitChildren(
       (child) => _visitElementForPlatformViews(
-          child, ancestor, masked, captured, seen, policy),
+        child,
+        ancestor,
+        masked,
+        captured,
+        seen,
+        policy,
+        captureBounds,
+      ),
     );
   }
 
@@ -207,6 +266,7 @@ class ScreenshotCapturer {
     List<ElementData> captured,
     Set<int> seen,
     PostHogPlatformViewPrivacy policy,
+    Rect captureBounds,
   ) {
     if (!seen.add(identityHashCode(ro))) return;
     // TextureBox content is already composited into the Flutter image, so no
@@ -216,10 +276,22 @@ class ScreenshotCapturer {
     }
     try {
       final transform = ro.getTransformTo(ancestor);
+      final visibleRect = visiblePlatformViewRect(
+        ro.paintBounds,
+        transform,
+        captureBounds,
+      );
+      if (visibleRect == null) {
+        printIfDebug('Skipping off-screen platform view.');
+        return;
+      }
       final data = ElementData(
-        rect: ro.paintBounds,
+        // Native capture and compositing both use an axis-aligned window crop.
+        // Store the already transformed/clipped rect in capture coordinates so
+        // partially visible scrolling views cannot paint outside the viewport.
+        rect: visibleRect,
         type: 'platformView',
-        transform: transform,
+        transform: Matrix4.identity(),
       );
       if (policy == PostHogPlatformViewPrivacy.capture) {
         captured.add(data);
@@ -263,12 +335,10 @@ class ScreenshotCapturer {
       _imageMaskPainter.drawMaskedImage(canvas, [viewRect], pixelRatio);
       return;
     }
-    canvas.drawImageRect(
+    drawCapturedPlatformView(
+      canvas,
       nativeImage,
-      Rect.fromLTWH(
-          0, 0, nativeImage.width.toDouble(), nativeImage.height.toDouble()),
       transformedRect,
-      Paint()..blendMode = ui.BlendMode.srcOver,
     );
     nativeImage.dispose();
   }
@@ -541,7 +611,10 @@ class ScreenshotCapturer {
         final defaultPolicy = replayConfig.maskAllPlatformViews
             ? PostHogPlatformViewPrivacy.mask
             : PostHogPlatformViewPrivacy.capture;
-        final pvRects = _collectPlatformViewRects(defaultPolicy);
+        final pvRects = _collectPlatformViewRects(
+          defaultPolicy,
+          Rect.fromLTWH(0, 0, srcWidth, srcHeight),
+        );
         final hasCapturedViews = pvRects.captured.isNotEmpty;
         hasCapturedPlatformViews = hasCapturedViews;
 
@@ -571,6 +644,30 @@ class ScreenshotCapturer {
           return;
         }
 
+        if (pvRects.captured.isNotEmpty) {
+          final specs = pvRects.captured
+              .map((r) => _viewSpec(r, globalPosition))
+              .toList();
+          final bytesList =
+              await _nativeCommunicator.captureNativeScreenshots(specs);
+          if (_cancelled) {
+            currentRecorder.endRecording().dispose();
+            recorder = null;
+            completer.complete(null);
+            return;
+          }
+          for (var i = 0; i < pvRects.captured.length; i++) {
+            final spec = specs[i];
+            final bytes = i < bytesList.length ? bytesList[i] : null;
+            await _compositeRevealedView(canvas, pvRects.captured[i], bytes,
+                spec['width']!, spec['height']!, pixelRatio);
+          }
+        }
+
+        // Native window crops include Flutter overlays and may also contain
+        // other platform views. Apply every privacy mask after compositing so
+        // captured pixels can never paint over a text/image/manual/platform
+        // mask.
         if (replayConfig.maskAllTexts || replayConfig.maskAllImages) {
           if (elementsDataWidgets != null && elementsDataWidgets.isNotEmpty) {
             _imageMaskPainter.drawMaskedImage(
@@ -596,25 +693,6 @@ class ScreenshotCapturer {
             pvRects.masked,
             pixelRatio,
           );
-        }
-        if (pvRects.captured.isNotEmpty) {
-          final specs = pvRects.captured
-              .map((r) => _viewSpec(r, globalPosition))
-              .toList();
-          final bytesList =
-              await _nativeCommunicator.captureNativeScreenshots(specs);
-          if (_cancelled) {
-            currentRecorder.endRecording().dispose();
-            recorder = null;
-            completer.complete(null);
-            return;
-          }
-          for (var i = 0; i < pvRects.captured.length; i++) {
-            final spec = specs[i];
-            final bytes = i < bytesList.length ? bytesList[i] : null;
-            await _compositeRevealedView(canvas, pvRects.captured[i], bytes,
-                spec['width']!, spec['height']!, pixelRatio);
-          }
         }
 
         picture = currentRecorder.endRecording();

@@ -4,6 +4,36 @@ import 'package:posthog_flutter/src/replay/mask/posthog_platform_view.dart';
 import 'package:posthog_flutter/src/replay/screenshot/screenshot_capturer.dart';
 
 void main() {
+  group('visiblePlatformViewRect', () {
+    const captureBounds = Rect.fromLTWH(0, 0, 100, 100);
+
+    test('returns null for a platform view outside the capture target', () {
+      final transform = Matrix4.translationValues(0, 120, 0);
+
+      expect(
+        visiblePlatformViewRect(
+          const Rect.fromLTWH(0, 0, 100, 20),
+          transform,
+          captureBounds,
+        ),
+        isNull,
+      );
+    });
+
+    test('clips a partially visible scrolling platform view', () {
+      final transform = Matrix4.translationValues(0, -10, 0);
+
+      expect(
+        visiblePlatformViewRect(
+          const Rect.fromLTWH(0, 0, 100, 20),
+          transform,
+          captureBounds,
+        ),
+        const Rect.fromLTWH(0, 0, 100, 10),
+      );
+    });
+  });
+
   group('resolvePrivacyPolicyForElement — privacy inheritance', () {
     testWidgets('unwrapped widget inherits the default mask policy',
         (tester) async {
